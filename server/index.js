@@ -25,7 +25,7 @@ app.post('/api/chat', async (req, res) => {
     const chat = ai.chats.create({
       model: 'gemini-3-flash-preview',
       config: {
-        systemInstruction: 'You are an expert AI Computer Science Tutor for the Malaysian SPM syllabus.',
+        systemInstruction: 'You are an expert AI Computer Science Tutor.',
         temperature: 0.5,
       },
       history: history || []

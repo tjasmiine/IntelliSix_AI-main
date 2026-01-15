@@ -19,20 +19,28 @@ import Chatbot from './components/Chatbot';
 import NotificationBanner from './components/NotificationBanner';
 
 const App: React.FC = () => {
-  // Persistence removed: resets on reload.
   const [state, setState] = useState<LearningState>(INITIAL_STATE);
   const [materials, setMaterials] = useState<LearningMaterial[]>(INITIAL_MATERIALS);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   
-  // Quiz Session State
   const [quizSession, setQuizSession] = useState<{ topicId: string, index: number } | null>(null);
   const [quizFinished, setQuizFinished] = useState(false);
   const [lastScore, setLastScore] = useState(0);
   const [lastRawScore, setLastRawScore] = useState<{score: number, total: number} | null>(null);
   const [motivation, setMotivation] = useState<string | null>(null);
-
-  // Study Mode State
   const [viewingMaterial, setViewingMaterial] = useState<LearningMaterial | null>(null);
+
+  useEffect(() => {
+    const checkKey = async () => {
+      if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          console.log("No API Key selected yet. User might need to open selection dialog.");
+        }
+      }
+    };
+    checkKey();
+  }, []);
 
   const addLog = useCallback((type: LogEntry['type'], message: string) => {
     setLogs(prev => [
@@ -46,7 +54,6 @@ const App: React.FC = () => {
     ]);
   }, []);
 
-  // Agent Reasoning Engine - Thresholds and Unlocking Rules
   useEffect(() => {
     if (quizSession) return;
 
@@ -55,68 +62,57 @@ const App: React.FC = () => {
       const basicMaterial = materials.find(m => m.id === BASIC_MATERIAL.id);
       const basicMaterialExists = !!basicMaterial;
       
-      // Advanced Unlock Criteria:
-      // 1. No quiz score < 50% anywhere on the board
+      // Check if any foundational quiz has a score below 50%
+      const hasFoundationalCriticalFail = foundationalMaterials.some(m => {
+        const scores = Object.values(m.assessmentScores || {}) as number[];
+        return scores.some(s => s < 50);
+      });
+
+      // UPDATED LOGIC: Unlock basic module immediately upon ANY foundational failure (< 50%)
+      if (hasFoundationalCriticalFail && !basicMaterialExists) {
+        addLog('REASONING', 'Gating Check: Foundational failure detected (< 50%). Unlocking Basic Module for remedial support.');
+        setMaterials(prev => [BASIC_MATERIAL, ...prev]);
+        setMotivation("Basic module unlocked. We noticed you're struggling with some core concepts. Please complete these basic skills to build a stronger foundation!");
+        return;
+      }
+
+      // Check if all foundational topics have been cleared with at least 50%
+      const allFoundationalPassedThreshold = foundationalMaterials.every(m => {
+        const scores = Object.values(m.assessmentScores || {}) as number[];
+        return scores.length > 0 && scores.every(s => s >= 50);
+      });
+
+      let basicPassedThreshold = true;
+      if (basicMaterialExists && basicMaterial) {
+          const scores = Object.values(basicMaterial.assessmentScores || {}) as number[];
+          // If basic exists, it must also be passed with 50%
+          basicPassedThreshold = scores.length > 0 && scores.every(s => s >= 50);
+      }
+
       const noCriticalFailures = materials.every(m => {
         const scores = Object.values(m.assessmentScores || {}) as number[];
         return scores.every(s => s >= 50);
       });
 
-      // 2. All foundational quizzes must be >= 50%
-      const allFoundationalPassed = foundationalMaterials.every(m => {
-        const scores = Object.values(m.assessmentScores || {}) as number[];
-        return m.completedAssessments.length === 2 && scores.every(score => score >= 50);
-      });
-
-      // 3. If Basic is unlocked, it must be >= 50%
-      let allBasicPassed = true;
-      if (basicMaterialExists && basicMaterial) {
-          const scores = Object.values(basicMaterial.assessmentScores || {}) as number[];
-          allBasicPassed = basicMaterial.completedAssessments.length === 2 && scores.every(s => s >= 50);
-      }
-
       const advancedLocked = materials.some(m => m.level === 'Advanced' && m.locked);
 
-      // Mastery Check: Unlock Advanced
-      if (allFoundationalPassed && allBasicPassed && noCriticalFailures && advancedLocked) {
-        addLog('REASONING', 'Unlocking Advanced: 50% threshold met.');
+      // Advanced unlocks only when both foundational and basic (if unlocked) are passed at 50%
+      if (allFoundationalPassedThreshold && basicPassedThreshold && noCriticalFailures && advancedLocked) {
+        addLog('REASONING', 'Unlocking Advanced: 50% threshold met across all required modules.');
         setMaterials(prev => prev.map(m => m.level === 'Advanced' ? { ...m, locked: false } : m));
-        setMotivation("Advanced material unlocked! You've maintained the required 50% threshold.");
+        setMotivation("Advanced material is now available! Great job recovering your score.");
         return;
       }
 
-      // Basic Module Unlock Logic:
-      // Only unlock when ALL foundational are completed AND at least one quiz score < 50%
-      const allFoundationalCompleted = foundationalMaterials.every(m => m.completedAssessments.length === 2);
-      const atLeastOneFoundationalCriticalFail = foundationalMaterials.some(m => {
-        const scores = Object.values(m.assessmentScores || {}) as number[];
-        return scores.some(s => s < 50);
-      });
-
-      if (allFoundationalCompleted && atLeastOneFoundationalCriticalFail && !basicMaterialExists) {
-        addLog('REASONING', 'Critical performance gap detected. Injecting Basic Module.');
-        setMaterials(prev => [BASIC_MATERIAL, ...prev]);
-        setMotivation("Foundational challenges detected. I've added Basic Computing to help you bridge the gap.");
-        return;
-      }
-
-      // Relock check for Advanced
+      // Re-lock if new failures appear
       if (!noCriticalFailures && !advancedLocked) {
-        addLog('REASONING', 'Score dropped below 50%. Re-locking Advanced.');
         setMaterials(prev => prev.map(m => m.level === 'Advanced' ? { ...m, locked: true } : m));
-        setMotivation("Advanced modules locked. All quizzes must score at least 50% to maintain access.");
+        setMotivation("Advanced material relocked. Maintain at least 50% on all quizzes to stay in advanced mode.");
         return;
-      }
-
-      if (motivation === null) {
-        const attemptedAllFoundational = foundationalMaterials.every(m => m.completedAssessments.length === 2);
-        if (advancedLocked && attemptedAllFoundational) {
-           setMotivation("Access to Advanced material requires at least 50% on all current quizzes.");
-        }
       }
     };
     evaluateRules();
-  }, [materials, state.sl, state.qs, addLog, motivation, quizSession]);
+  }, [materials, quizSession, addLog]);
 
   const handleStartStudy = (material: LearningMaterial) => {
     addLog('SENSOR', `User opened study notes for ${material.title}`);
@@ -151,14 +147,6 @@ const App: React.FC = () => {
 
     addLog('SENSOR', `Quiz Result: ${percentage}%`);
 
-    if (percentage < 50) {
-      setMotivation("Score below 50%. Mastery required for advancement.");
-    } else if (percentage < 100) {
-      setMotivation("Threshold passed! Aim for 100% to hit full completion.");
-    } else {
-      setMotivation("Perfect! 100% mastery achieved.");
-    }
-
     setMaterials(prev => prev.map(m => {
       if (m.id === quizSession.topicId) {
         const newCompleted = m.completedAssessments.includes(quizSession.index)
@@ -173,33 +161,29 @@ const App: React.FC = () => {
     setState(prev => ({
       ...prev,
       qs: QuizStatus.COMPLETED,
-      sl: percentage < 50 ? ScoreLevel.LOW : percentage < 80 ? ScoreLevel.MEDIUM : ScoreLevel.HIGH,
-      ep: errors > 0 ? ErrorPattern.HIGH : ErrorPattern.LOW,
-      pc: percentage >= 80 ? PerformanceClassification.HIGH : PerformanceClassification.LOW
+      sl: percentage < 50 ? ScoreLevel.LOW : percentage < 100 ? ScoreLevel.MEDIUM : ScoreLevel.HIGH,
+      pc: percentage === 100 ? PerformanceClassification.HIGH : PerformanceClassification.LOW
     }));
 
     setQuizSession(null);
     setQuizFinished(true);
   };
 
-  // Completion calculation: Every quiz must hit 100% to count toward the total
   const completionPercentage = useMemo(() => {
     let perfectQuizzes = 0;
-    let totalQuizzesAvailable = 0;
+    let totalQuizzesPossible = 0;
 
     materials.forEach(material => {
-      const topicQuizzes = TOPIC_QUIZZES[material.id];
-      if (topicQuizzes) {
-        totalQuizzesAvailable += topicQuizzes.length;
-        if (material.assessmentScores) {
-          const hundredPercentScores = Object.values(material.assessmentScores).filter(s => s === 100).length;
-          perfectQuizzes += hundredPercentScores;
-        }
+      const assessments = TOPIC_QUIZZES[material.id];
+      if (assessments) {
+        totalQuizzesPossible += assessments.length;
+        const scores = Object.values(material.assessmentScores || {});
+        perfectQuizzes += scores.filter(s => s === 100).length;
       }
     });
 
-    if (totalQuizzesAvailable === 0) return 0;
-    return Math.round((perfectQuizzes / totalQuizzesAvailable) * 100);
+    if (totalQuizzesPossible === 0) return 0;
+    return Math.round((perfectQuizzes / totalQuizzesPossible) * 100);
   }, [materials]);
 
   return (
@@ -212,13 +196,13 @@ const App: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl font-black text-slate-800">IntelliSix DB</h1>
-              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Mastery Tracking</p>
+              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Completion Tracking</p>
             </div>
           </div>
 
           <div className="flex-1 max-w-md mx-auto w-full">
             <div className="flex justify-between items-center mb-1.5 px-1">
-              <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">Completion (100% Target)</span>
+              <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">Course Completion (100% Mastery)</span>
               <span className="text-[10px] font-black text-indigo-600 uppercase">{completionPercentage}%</span>
             </div>
             <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-50">
@@ -259,13 +243,13 @@ const App: React.FC = () => {
                   <i className={`fa-solid ${lastScore < 50 ? 'fa-xmark' : lastScore < 100 ? 'fa-check' : 'fa-star'}`}></i>
                 </div>
                 <h2 className="text-2xl font-black text-slate-800">
-                  {lastScore === 100 ? 'Perfect Mastery!' : lastScore >= 50 ? 'Threshold Met' : 'Assessment Failed'}
+                  {lastScore === 100 ? 'Perfect Completion!' : lastScore >= 50 ? 'Assessment Passed' : 'Assessment Failed'}
                 </h2>
                 <div className={`text-6xl font-black mt-6 mb-2 ${
                   lastScore < 50 ? 'text-red-500' : lastScore < 100 ? 'text-amber-500' : 'text-green-600'
                 }`}>{lastScore}%</div>
                 <div className="text-lg text-slate-500 font-bold mb-8">
-                  {lastScore === 100 ? "Completion updated." : "Score recorded. Advanced modules require 50% across the board."}
+                  {lastScore === 100 ? "Score contributes to total completion." : "Try again for 100% to fill your completion bar."}
                 </div>
                 <button 
                   onClick={() => setQuizFinished(false)}
@@ -282,7 +266,7 @@ const App: React.FC = () => {
                     onClick={() => window.location.reload()}
                     className="text-[10px] font-black uppercase text-slate-400 hover:text-indigo-600 transition-colors"
                   >
-                    <i className="fa-solid fa-rotate-right mr-1"></i> Reset All
+                    <i className="fa-solid fa-rotate-right mr-1"></i> Reset App
                   </button>
                 </div>
                 <LearningPath 
